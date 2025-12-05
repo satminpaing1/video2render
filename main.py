@@ -1,14 +1,18 @@
+import os
+import uuid
+import yt_dlp
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import yt_dlp
-import os
-import uuid
+
+# FFmpeg Auto-Setup
+import static_ffmpeg
+static_ffmpeg.add_paths()
 
 app = FastAPI()
 
-# Allow all CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,16 +24,17 @@ app.add_middleware(
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Serve files
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
+
+# Audio Only Format String
+SPECIAL_AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "ThuYaAungZaw Downloader API (FFMPEG Enabled)"}
-
+    return {"status": "ok", "message": "Kaneki Downloader (Lite Version)"}
 
 # ------------------------------------------------------------
-#  FORMATS (only valid video/audio formats)
+# 1. SMART FORMATS
 # ------------------------------------------------------------
 @app.get("/formats")
 def get_formats(url: str):
@@ -38,115 +43,118 @@ def get_formats(url: str):
 
     ydl_opts = {
         "quiet": True,
+        "noplaylist": True,
         "skip_download": True,
         "nocheckcertificate": True,
-        "noplaylist": True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+        
+        raw_formats = info.get('formats', [])
+        available_heights = set()
 
-        extractor = (info.get("extractor") or "").lower()
-        fmts = []
+        for f in raw_formats:
+            if f.get('vcodec') != 'none' and f.get('height'):
+                available_heights.add(f['height'])
 
-        for f in info.get("formats", []):
-            vcodec = (f.get("vcodec") or "").lower()
-            acodec = (f.get("acodec") or "").lower()
-            ext = (f.get("ext") or "").lower()
-            height = f.get("height") or 0
-            fps = f.get("fps")
+        final_formats = []
+        target_resolutions = [2160, 1440, 1080, 720, 480, 360]
+        
+        for res in target_resolutions:
+            if res in available_heights:
+                final_formats.append({
+                    "format_id": f"v-{res}", 
+                    "ext": "mp4",       
+                    "vcodec": "h264",
+                    "height": res,
+                    "label": f"{res}p"
+                })
 
-            # ignore audio-only
-            if vcodec == "none":
-                continue
-
-            # ignore video-only ONLY if it's not YouTube (YT needs merging)
-            if "youtube" not in extractor:
-                if acodec == "none":
-                    continue
-
-            # only mp4 allowed (we will merge to mp4)
-            if ext != "mp4":
-                continue
-
-            # create label
-            label = ""
-            if height:
-                label = f"{height}p"
-            if fps:
-                label += f" {fps}fps"
-
-            if not label:
-                label = f.get("format_note") or f.get("format_id")
-
-            fmts.append({
-                "format_id": f.get("format_id"),
-                "label": label,
-                "height": height,
+        if not final_formats:
+             final_formats.append({
+                "format_id": "v-360",
+                "ext": "mp4",
+                "vcodec": "h264",
+                "height": 360
             })
 
-        # sort highest → lowest
-        fmts.sort(key=lambda x: x["height"], reverse=True)
-
-        # remove height when returning
-        for f in fmts:
-            f.pop("height", None)
-
-        return {"formats": fmts}
+        return {"formats": final_formats}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error analyzing: {e}")
+        return {"formats": []}
 
 
 # ------------------------------------------------------------
-#  DOWNLOAD (FFMPEG MERGE ENABLED)
+# 2. DOWNLOAD HANDLER (OPTIMIZED FOR SIZE)
 # ------------------------------------------------------------
-def download_with_ytdlp(url: str, format_id: str) -> str:
-    """
-    This version merges video+audio into playable MP4.
-    Required: Railway Pro (FFmpeg installed)
-    """
-
-    unique_name = str(uuid.uuid4())
-    out_path = os.path.join(DOWNLOAD_DIR, unique_name + ".mp4")
-
-    ydl_opts = {
-        "format": format_id + "+bestaudio/best",  # force merge
-        "outtmpl": out_path,
-        "merge_output_format": "mp4",             # ensure playable MP4
-        "quiet": True,
-        "noplaylist": True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-    return os.path.basename(out_path)
-
-
 @app.get("/download")
 def download(url: str, format_id: str):
     if not url or not format_id:
         raise HTTPException(status_code=400, detail="Missing parameters")
 
     try:
-        filename = download_with_ytdlp(url, format_id)
+        uid = str(uuid.uuid4())[:8]
+        out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
+        
+        ydl_opts = {
+            "outtmpl": out_tmpl,
+            "quiet": True,
+            "noplaylist": True,
+            "nocheckcertificate": True,
+            # Speed Fix: ရှုပ်ထွေးတဲ့ concurrent တွေဖြုတ်လိုက်ပါပြီ
+            # ဒါက Server အသေးတွေမှာ ပိုငြိမ်ပြီး ပိုမြန်ပါတယ်
+        }
+
+        # --- VIDEO REQUEST ---
+        if format_id.startswith("v-"):
+            height = format_id.split("-")[1]
+            # Video အတွက် Audio ကိုအရမ်းကြီးတာမယူဘဲ 128k အောက်ကိုပဲယူမယ် (မြန်အောင်လို့)
+            ydl_opts["format"] = f"bestvideo[height={height}]+bestaudio[abr<=128]/best[height={height}]"
+            ydl_opts["merge_output_format"] = "mp4"
+
+        # --- AUDIO REQUEST (SUPER COMPRESSED) ---
+        elif format_id == SPECIAL_AUDIO_FORMAT or "bestaudio" in format_id:
+            # Source file ကိုကတည်းက အသေးဆုံးဖြစ်နိုင်တာကို အရင်ရှာဆွဲမယ်
+            ydl_opts["format"] = "bestaudio[abr<=128]/bestaudio"
+            
+            # ပြီးမှ MP3 96kbps (Size အတော်သေး) သို့ ပြောင်းမယ်
+            ydl_opts["postprocessors"] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '96', # 128 ကနေ 96 ပြောင်းလိုက်သည် (Size ပိုသေးရန်)
+            }]
+        
+        else:
+            ydl_opts["format"] = "best[ext=mp4]"
+
+
+        # Execute Download
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            # Video Extension Fix
+            if format_id.startswith("v-") and filename.endswith(".mkv"):
+                 pre, _ = os.path.splitext(filename)
+                 if os.path.exists(pre + ".mp4"):
+                     filename = pre + ".mp4"
+            
+            # Audio Extension Fix
+            if "bestaudio" in format_id or format_id == SPECIAL_AUDIO_FORMAT:
+                pre, _ = os.path.splitext(filename)
+                if os.path.exists(pre + ".mp3"):
+                    filename = pre + ".mp3"
+
+        clean_filename = os.path.basename(filename)
 
         return {
-            "download_url": f"/file/{filename}",
-            "filename": filename,
+            "download_url": f"/files/{clean_filename}",
+            "filename": clean_filename
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/file/{filename}")
-def get_file(filename: str):
-    filepath = os.path.join(DOWNLOAD_DIR, filename)
-
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    return FileResponse(filepath, media_type="video/mp4", filename=filename)
+        print(f"DL Error: {e}")
+        raise HTTPException(status_code=500, detail="Download Failed")
