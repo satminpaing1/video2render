@@ -1,6 +1,6 @@
-fastapi==0.100.0
-uvicorn[standard]==0.23.0
-python-multipart==0.0.6
-requests==2.31.0
-aiofiles==23.2.1
+fastapi
+uvicorn
+python-multipart
+requests
 yt-dlp
+static-ffmpeg
