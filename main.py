@@ -1,18 +1,19 @@
+# main.py
 import os
 import uuid
+import time
+import glob
+import socket
+import requests
 import yt_dlp
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 
-# FFmpeg Auto-Setup
-import static_ffmpeg
-static_ffmpeg.add_paths()
+app = FastAPI(title="Kaneki Downloader (Render)")
 
-app = FastAPI()
-
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,140 +22,172 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DOWNLOAD_DIR = "downloads"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
-# Audio Only Format String
-SPECIAL_AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
+AUDIO_ID = "audio_mp3"
+
 
 @app.get("/")
-def root():
-    return {"status": "ok", "message": "Kaneki Downloader (Lite Version)"}
+def home():
+    return {"status": "ok", "message": "Kaneki Downloader (Render) Running"}
 
-# ------------------------------------------------------------
-# 1. SMART FORMATS
-# ------------------------------------------------------------
+
+# Network diagnostic endpoint
+@app.get("/nettest")
+def nettest():
+    hosts = ["www.youtube.com", "www.google.com", "api.github.com"]
+    dns_results = {}
+    for h in hosts:
+        try:
+            addrs = socket.getaddrinfo(h, 443)
+            dns_results[h] = {"resolved": True, "addresses": list({a[4][0] for a in addrs})}
+        except Exception as e:
+            dns_results[h] = {"resolved": False, "error": str(e)}
+
+    http_results = {}
+    urls = ["https://www.google.com", "https://www.youtube.com", "https://httpbin.org/ip"]
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=5)
+            http_results[u] = {"ok": True, "status": r.status_code}
+        except Exception as e:
+            http_results[u] = {"ok": False, "error": str(e)}
+
+    return JSONResponse({"dns": dns_results, "http": http_results})
+
+
 @app.get("/formats")
-def get_formats(url: str):
+def formats(url: str):
     if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
+        raise HTTPException(400, "URL is required")
 
-    ydl_opts = {
+    opts = {
         "quiet": True,
-        "noplaylist": True,
+        "no_warnings": True,
         "skip_download": True,
-        "nocheckcertificate": True,
+        "force_ipv4": True,
+        "noplaylist": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
 
+    PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+    if PROXY:
+        opts["proxy"] = PROXY
+
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-        
-        raw_formats = info.get('formats', [])
-        available_heights = set()
 
-        for f in raw_formats:
-            if f.get('vcodec') != 'none' and f.get('height'):
-                available_heights.add(f['height'])
+        heights = set()
+        for f in info.get("formats", []) or []:
+            h = f.get("height")
+            if h:
+                try:
+                    heights.add(int(h))
+                except:
+                    pass
 
-        final_formats = []
-        target_resolutions = [2160, 1440, 1080, 720, 480, 360]
-        
-        for res in target_resolutions:
-            if res in available_heights:
-                final_formats.append({
-                    "format_id": f"v-{res}", 
-                    "ext": "mp4",       
-                    "vcodec": "h264",
-                    "height": res,
-                    "label": f"{res}p"
-                })
+        target = [2160, 1440, 1080, 720, 480, 360]
+        out = []
+        out.append({"format_id": "v-auto", "label": "Auto (Best)", "ext": "mp4"})
+        for h in target:
+            if h in heights:
+                out.append({"format_id": f"v-{h}", "label": f"{h}p", "ext": "mp4"})
+        out.append({"format_id": AUDIO_ID, "label": "MP3 (128kbps)", "ext": "mp3"})
 
-        if not final_formats:
-             final_formats.append({
-                "format_id": "v-360",
-                "ext": "mp4",
-                "vcodec": "h264",
-                "height": 360
-            })
-
-        return {"formats": final_formats}
-
+        return {"formats": out}
     except Exception as e:
-        print(f"Error analyzing: {e}")
+        msg = str(e)
+        print("FORMAT ERROR:", msg)
+        if "No address associated with hostname" in msg or "Name or service not known" in msg:
+            return {"error": "DNS_ERROR", "detail": "Cannot reach YouTube from this runtime. Check /nettest."}
         return {"formats": []}
 
 
-# ------------------------------------------------------------
-# 2. DOWNLOAD HANDLER (OPTIMIZED FOR SIZE)
-# ------------------------------------------------------------
+def find_output(prefix):
+    for _ in range(12):
+        files = glob.glob(os.path.join(DOWNLOAD_DIR, prefix + "*"))
+        if files:
+            files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            return files[0]
+        time.sleep(0.3)
+    return None
+
+
 @app.get("/download")
 def download(url: str, format_id: str):
     if not url or not format_id:
-        raise HTTPException(status_code=400, detail="Missing parameters")
+        raise HTTPException(400, "Missing parameters")
+
+    uid = str(uuid.uuid4())[:8]
+    prefix = f"kaneki_{uid}"
+    outtmpl = os.path.join(DOWNLOAD_DIR, prefix + ".%(ext)s")
+
+    opts = {
+        "outtmpl": outtmpl,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "continuedl": True,
+        "retries": 3,
+        "socket_timeout": 120,
+        "force_ipv4": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
+    }
+
+    PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+    if PROXY:
+        opts["proxy"] = PROXY
+
+    if format_id == "v-auto":
+        opts["format"] = "bestvideo+bestaudio/best"
+        opts["merge_output_format"] = "mp4"
+    elif format_id.startswith("v-"):
+        try:
+            h = int(format_id.split("-")[1])
+            opts["format"] = f"bestvideo[height<={h}]+bestaudio/best"
+            opts["merge_output_format"] = "mp4"
+        except:
+            opts["format"] = "bestvideo+bestaudio/best"
+            opts["merge_output_format"] = "mp4"
+    elif format_id == AUDIO_ID:
+        opts["format"] = "bestaudio/best"
+        opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "128"
+        }]
+    else:
+        opts["format"] = "best"
 
     try:
-        uid = str(uuid.uuid4())[:8]
-        out_tmpl = os.path.join(DOWNLOAD_DIR, f"kaneki_{uid}.%(ext)s")
-        
-        ydl_opts = {
-            "outtmpl": out_tmpl,
-            "quiet": True,
-            "noplaylist": True,
-            "nocheckcertificate": True,
-            # Speed Fix: ရှုပ်ထွေးတဲ့ concurrent တွေဖြုတ်လိုက်ပါပြီ
-            # ဒါက Server အသေးတွေမှာ ပိုငြိမ်ပြီး ပိုမြန်ပါတယ်
-        }
-
-        # --- VIDEO REQUEST ---
-        if format_id.startswith("v-"):
-            height = format_id.split("-")[1]
-            # Video အတွက် Audio ကိုအရမ်းကြီးတာမယူဘဲ 128k အောက်ကိုပဲယူမယ် (မြန်အောင်လို့)
-            ydl_opts["format"] = f"bestvideo[height={height}]+bestaudio[abr<=128]/best[height={height}]"
-            ydl_opts["merge_output_format"] = "mp4"
-
-        # --- AUDIO REQUEST (SUPER COMPRESSED) ---
-        elif format_id == SPECIAL_AUDIO_FORMAT or "bestaudio" in format_id:
-            # Source file ကိုကတည်းက အသေးဆုံးဖြစ်နိုင်တာကို အရင်ရှာဆွဲမယ်
-            ydl_opts["format"] = "bestaudio[abr<=128]/bestaudio"
-            
-            # ပြီးမှ MP3 96kbps (Size အတော်သေး) သို့ ပြောင်းမယ်
-            ydl_opts["postprocessors"] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '96', # 128 ကနေ 96 ပြောင်းလိုက်သည် (Size ပိုသေးရန်)
-            }]
-        
-        else:
-            ydl_opts["format"] = "best[ext=mp4]"
-
-
-        # Execute Download
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        print(f"Starting download uid={uid} url={url} format={format_id}")
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            # Video Extension Fix
-            if format_id.startswith("v-") and filename.endswith(".mkv"):
-                 pre, _ = os.path.splitext(filename)
-                 if os.path.exists(pre + ".mp4"):
-                     filename = pre + ".mp4"
-            
-            # Audio Extension Fix
-            if "bestaudio" in format_id or format_id == SPECIAL_AUDIO_FORMAT:
-                pre, _ = os.path.splitext(filename)
-                if os.path.exists(pre + ".mp3"):
-                    filename = pre + ".mp3"
 
-        clean_filename = os.path.basename(filename)
+        produced = find_output(prefix)
+        if not produced:
+            raise RuntimeError("No output file produced")
 
+        filename = os.path.basename(produced)
         return {
-            "download_url": f"/files/{clean_filename}",
-            "filename": clean_filename
+            "download_url": f"/files/{filename}",
+            "filename": filename,
+            "title": info.get("title"),
         }
-
+    except yt_dlp.utils.DownloadError as e:
+        print("yt-dlp DownloadError:", str(e))
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
     except Exception as e:
-        print(f"DL Error: {e}")
-        raise HTTPException(status_code=500, detail="Download Failed")
+        msg = str(e)
+        print("Download error:", msg)
+        if "No address associated with hostname" in msg:
+            raise HTTPException(
+                502,
+                "DNS Error: runtime cannot access YouTube. Use HTTP_PROXY env or host on different provider."
+            )
+        raise HTTPException(status_code=500, detail=f"Download Error: {msg}")
