@@ -1,20 +1,21 @@
-# Python 3.9 ကို အခြေခံမယ်
-FROM python:3.9-slim
+FROM python:3.10-slim
 
-# ပြဿနာ၏ အဖြေ: FFmpeg (Merge လုပ်ရန်) နှင့် Node.js (Speed ကောင်းရန်) ကို Install လုပ်မယ်
-RUN apt-get update && \
-    apt-get install -y ffmpeg nodejs && \
-    rm -rf /var/lib/apt/lists/*
-
-# Work Directory သတ်မှတ်မယ်
+ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Requirements တွေကို Install လုပ်မယ်
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ffmpeg \
+      ca-certificates && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ကုဒ်တွေအားလုံးကို ကူးထည့်မယ်
-COPY . .
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r /app/requirements.txt
 
-# App ကို Run မယ် (Render ရဲ့ Port ကို အလိုအလျောက် ယူပါလိမ့်မယ်)
-CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
+RUN mkdir -p /app/downloads && chmod -R 0777 /app/downloads || true
+COPY . /app
+RUN chmod -R 0777 /app/downloads || true
+
+EXPOSE 7860
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-7860}"]
