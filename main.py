@@ -1,7 +1,5 @@
 # main.py
-# Kaneki Downloader - cleaned, playlist-safe, cookies-aware version
-# Requirements: fastapi, uvicorn, requests, yt-dlp
-# Optional: static-ffmpeg (if available). If not, ffmpeg must be installed on system.
+# Kaneki Downloader - Cleaned and Optimized for Direct Streaming
 
 import os
 import uuid
@@ -15,18 +13,18 @@ import yt_dlp
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, RedirectResponse
 
-# try optional static ffmpeg helper (some hosts provide this package)
+# --- FFmpeg Loading (Relies on system ffmpeg from Dockerfile) ---
 try:
     import static_ffmpeg
     static_ffmpeg.add_paths()
     print("static_ffmpeg loaded")
 except Exception:
-    print("static_ffmpeg not available - assuming system ffmpeg (or ffmpeg not needed for listing).")
+    print("static_ffmpeg not available - assuming system ffmpeg.")
 
 # ----------------- App setup -----------------
-app = FastAPI(title="Kaneki Downloader - Cleaned")
+app = FastAPI(title="Kaneki Downloader - Direct Stream")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,16 +35,16 @@ app.add_middleware(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
+# DOWNLOAD_DIR ကို ဒီ Code မှာ အသုံးမပြုတော့ပါ (တိုက်ရိုက် Stream လုပ်မှာမို့)
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads") 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
 
 # ----------------- Cookie handling -----------------
-COOKIE_ENV = os.environ.get("YOUTUBE_COOKIES", "")  # set this in Render/Railway with Netscape cookie content
+COOKIE_ENV = os.environ.get("YOUTUBE_COOKIES", "")
 COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
 if COOKIE_ENV and COOKIE_ENV.strip():
-    # quick heuristic check: if env looks like JSON (starts with { or [), warn the user
     stripped = COOKIE_ENV.lstrip()
     if stripped.startswith("{") or stripped.startswith("["):
         print("WARNING: YOUTUBE_COOKIES appears to be JSON. yt-dlp expects Netscape 'cookies.txt' format.")
@@ -60,11 +58,10 @@ else:
     if os.path.exists(COOKIE_FILE):
         print("Using existing cookies file at", COOKIE_FILE)
     else:
-        print("No YOUTUBE_COOKIES provided. Running without cookies (may be blocked by YouTube).")
-        # COOKIE_FILE remains path but won't be used if not exists
-
+        print("No YOUTUBE_COOKIES provided. Running without cookies.")
+    
 # ----------------- Common settings -----------------
-AUDIO_ID = "audio_mp3"
+AUDIO_ID = "mp3-best" 
 
 COMMON_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
@@ -90,17 +87,13 @@ def ydl_base(extra: dict = None):
 
 # ----------------- Utilities -----------------
 def clean_youtube_url(url: str) -> str:
-    """
-    Convert playlist/mix/watch?urls into a canonical watch?v=VIDEO_ID URL (if possible).
-    Otherwise return original url.
-    """
+    """ Convert playlist/mix/watch?urls into a canonical watch?v=VIDEO_ID URL (if possible). """
     try:
         parsed = ul.urlparse(url)
         qs = ul.parse_qs(parsed.query)
         if "v" in qs and qs["v"]:
             vid = qs["v"][0]
             return f"https://www.youtube.com/watch?v={vid}"
-        # sometimes youtu.be links contain id as path
         if parsed.netloc.endswith("youtu.be"):
             vid = parsed.path.lstrip("/")
             if vid:
@@ -108,15 +101,6 @@ def clean_youtube_url(url: str) -> str:
     except Exception:
         pass
     return url
-
-def find_output(prefix: str, attempts: int = 20, wait: float = 0.3):
-    for _ in range(attempts):
-        files = glob.glob(os.path.join(DOWNLOAD_DIR, prefix + "*"))
-        if files:
-            files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-            return files[0]
-        time.sleep(wait)
-    return None
 
 # ----------------- Root and HEAD for health checks -----------------
 @app.get("/", include_in_schema=False)
@@ -157,9 +141,11 @@ def formats(url: str):
     opts = ydl_base({"skip_download": True})
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
+            # download=False is crucial to only fetch info
             info = ydl.extract_info(url, download=False)
 
         raw = info.get("formats", []) or []
+        # FIX: Ensure height is an int and filter formats with video streams
         heights = sorted({int(f["height"]) for f in raw if f.get("height") and f.get("vcodec") != "none"}, reverse=True)
 
         simplified = []
@@ -167,11 +153,13 @@ def formats(url: str):
         if heights:
             simplified.append({"format_id": "v-auto", "label": "Auto (best)", "ext": "mp4"})
             for h in heights:
+                # FIX: Resolution numbers are correctly included (e.g., "720p")
                 simplified.append({"format_id": f"v-{h}", "label": f"{h}p", "ext": "mp4"})
-        # audio alias
-        # detect if any audio-only formats exist
+        
+        # Audio alias
         audio_exists = any((f.get("acodec") and f.get("vcodec") == "none") for f in raw)
         if audio_exists:
+            # FIX: AUDIO_ID (mp3-best) is correctly used here
             simplified.append({"format_id": AUDIO_ID, "label": "MP3 (bestaudio)", "ext": "mp3"})
 
         # Also provide a sample of raw formats for advanced selection (first 40)
@@ -192,109 +180,70 @@ def formats(url: str):
     except Exception as e:
         msg = str(e)
         print("FORMAT ERROR:", msg)
-        if "No address associated with hostname" in msg:
-            raise HTTPException(status_code=502, detail="DNS Error: Cannot reach YouTube. Check /nettest.")
         if "Sign in to confirm you're not a bot" in msg or "use --cookies" in msg.lower():
             raise HTTPException(status_code=502, detail="COOKIES_REQUIRED: YouTube requires login cookies. Update YOUTUBE_COOKIES and redeploy.")
-        # fallback generic
         raise HTTPException(status_code=500, detail="Failed to fetch formats")
 
-# ----------------- Download endpoint -----------------
+# ----------------- DIRECT STREAMING ENDPOINT (FASTEST DOWNLOAD) -----------------
 @app.get("/download")
 def download(url: str, format_id: str):
+    """
+    Extracts the final streaming URL and redirects the user's browser to it. 
+    This is the fastest method as the server does not download or process the file.
+    """
     if not url or not format_id:
         raise HTTPException(status_code=400, detail="Missing parameters")
     url = clean_youtube_url(url)
 
-    uid = str(uuid.uuid4())[:8]
-    prefix = f"kaneki_{uid}"
-    outtmpl = os.path.join(DOWNLOAD_DIR, prefix + ".%(ext)s")
-
-    # Probe first to know available formats
-    probe_opts = ydl_base({"skip_download": True})
-    try:
-        with yt_dlp.YoutubeDL(probe_opts) as probe:
-            info = probe.extract_info(url, download=False)
-    except yt_dlp.utils.DownloadError as e:
-        msg = str(e)
-        print("Probe DownloadError:", msg)
-        if "Sign in to confirm you're not a bot" in msg or "use --cookies" in msg.lower():
-            raise HTTPException(status_code=502, detail="COOKIES_REQUIRED: YouTube requires login cookies. Update YOUTUBE_COOKIES and redeploy.")
-        raise HTTPException(status_code=500, detail=f"Probe failed: {msg}")
-    except Exception as e:
-        print("Probe failed:", e)
-        raise HTTPException(status_code=500, detail="Probe failed")
-
-    raw = info.get("formats", []) or []
-    available_format_ids = {f.get("format_id") for f in raw if f.get("format_id")}
-    available_heights = sorted({int(f["height"]) for f in raw if f.get("height") and f.get("vcodec") != "none"}, reverse=True)
-
-    # Decide final format expression
-    final_format_expr = None
+    # 1. Determine the format expression
     if format_id == "v-auto":
-        final_format_expr = "bestvideo+bestaudio/best"
+        format_expr = "bestvideo+bestaudio/best"
+    # FIX: Ensure AUDIO_ID is correctly checked and uses the best audio format expression
+    elif format_id == AUDIO_ID: 
+        format_expr = "bestaudio/best"
     elif format_id.startswith("v-"):
+        # For specific resolution, we still choose best video up to that height + best audio
         try:
             req_h = int(format_id.split("-")[1])
-            # choose highest available <= req_h
-            chosen = None
-            for h in available_heights:
-                if h <= req_h:
-                    chosen = h
-                    break
-            if not chosen and available_heights:
-                # fallback to smallest available
-                chosen = min(available_heights)
-            final_format_expr = f"bestvideo[height<={chosen}]+bestaudio/best"
+            format_expr = f"bestvideo[height<={req_h}]+bestaudio/best"
         except Exception:
-            final_format_expr = "bestvideo+bestaudio/best"
-    elif format_id == AUDIO_ID:
-        final_format_expr = "bestaudio/best"
+            format_expr = "bestvideo+bestaudio/best"
     else:
-        # If user provided a raw format id and it exists, use it. Otherwise try as expression.
-        if format_id in available_format_ids:
-            final_format_expr = format_id
-        else:
-            # try to use as expression when it includes typical tokens, else fallback to best
-            if any(tok in format_id for tok in ("best", "[", "+", "br=")):
-                final_format_expr = format_id
-            else:
-                final_format_expr = "bestvideo+bestaudio/best"
+        # Use provided raw format ID
+        format_expr = format_id
 
-    dl_opts = ydl_base({
-        "outtmpl": outtmpl,
-        "format": final_format_expr,
-        "retries": 3,
-        "continuedl": True,
-        "socket_timeout": 180,
+    # 2. Configure yt-dlp to only simulate and get the URL
+    opts = ydl_base({
+        "format": format_expr, 
+        "skip_download": True, # Very important: Do not download the file
+        "simulate": True,      # Very important: Just get info, including final URL
+        "nocheckcertificate": True,
+        # We don't need postprocessors for streaming, so we omit that part.
     })
-
-    if format_id == AUDIO_ID:
-        dl_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "128"
-        }]
-
+    
     try:
-        print(f"Starting download uid={uid} url={url} format_expr={final_format_expr}")
-        with yt_dlp.YoutubeDL(dl_opts) as ydl:
-            info2 = ydl.extract_info(url, download=True)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            # download=False returns the final stream URL in info['url']
+            info = ydl.extract_info(url, download=False)
 
-        produced = find_output(prefix)
-        if not produced:
-            raise RuntimeError("Download finished but no output file found. Check logs/yt-dlp messages.")
+        # The 'url' field contains the final direct streaming URL
+        final_url = info.get("url")
 
-        filename = os.path.basename(produced)
-        return {"download_url": f"/files/{filename}", "filename": filename, "title": info2.get("title")}
-    except yt_dlp.utils.DownloadError as e:
+        if final_url:
+            print(f"Redirecting user to stream URL: {final_url}")
+            # 3. Redirect the user's browser to the original YouTube/CDN stream URL
+            # The browser will handle the download/streaming directly from the source.
+            return RedirectResponse(url=final_url, status_code=302)
+        else:
+            raise RuntimeError("Failed to extract final streaming URL. Source may be unavailable.")
+
+    except Exception as e:
         msg = str(e)
-        print("yt-dlp DownloadError:", msg)
+        print("STREAM URL ERROR:", msg)
         if "Sign in to confirm you're not a bot" in msg or "use --cookies" in msg.lower():
             raise HTTPException(status_code=502, detail="COOKIES_REQUIRED: YouTube requires login cookies. Update YOUTUBE_COOKIES and redeploy.")
         if "Requested format is not available" in msg:
-            raise HTTPException(status_code=400, detail="FORMAT_NOT_AVAILABLE: Requested format isn't available. Call /formats to choose another.")
-        raise HTTPException(status_code=500, detail=f"Download failed: {msg}")
-    except Exception as e:
-        print("DOWNLOAD ERROR:", e)
-        raise HTTPException(status_code=500, detail=f"Download Error: {e}")
+            raise HTTPException(status_code=400, detail="FORMAT_NOT_AVAILABLE: Requested format isn't available. Try 'v-auto'.")
+        raise HTTPException(status_code=500, detail=f"Streaming failed: {msg}")
+
+# Note: The old server-side download logic is removed to prevent confusion and prioritize streaming.
