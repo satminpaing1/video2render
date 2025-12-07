@@ -59,20 +59,38 @@ COMMON_HEADERS = {
     "Referer": "https://www.youtube.com/",
 }
 
+# main.py ထဲက ydl_base နေရာမှာ ဒါကို အစားထိုးလိုက်ပါ
+
 def ydl_base(extra: dict = None):
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 120,
+        "socket_timeout": 30, # Timeout လျှော့လိုက်ပါ
         "force_ipv4": True,
-        "http_headers": COMMON_HEADERS,
         "nocheckcertificate": True,
-        # FFmpeg location define လုပ်ပေးရန်လိုနိုင်သည်
-        # "ffmpeg_location": "/usr/bin/ffmpeg", 
+        
+        # --- Anti-Bot & Spoofing Settings ---
+        "sleep_interval_requests": 1, # Request တစ်ခုနဲ့တစ်ခုကြား ၁ စက္ကန့်ခြားမယ်
+        "sleep_interval": 2,          # Download မလုပ်ခင် ၂ စက္ကန့် စောင့်မယ်
+        
+        # Browser အစစ်လို ဟန်ဆောင်ခြင်း
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        
+        # YouTube Client ကို Android ပုံစံပြောင်းသုံးခြင်း (ပိုပြီး Block ခံရသက်သာသည်)
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+                "skip": ["dash", "hls"]
+            }
+        }
     }
+    
+    # Cookies ဖိုင်ရှိမှ ထည့်မယ် (Cookies ကြောင့် Error တက်တာဖြစ်နိုင်လို့ တစ်ခါတလေ Cookies မပါဘဲ စမ်းကြည့်သင့်သည်)
     if os.path.exists(COOKIE_FILE):
-        opts["cookiefile"] = COOKIE_FILE
+        opts["cookiefile"] = COOKIE_FILE 
+        print(f"Loaded Cookies from {COOKIE_FILE}")
+
     if extra:
         opts.update(extra)
     return opts
