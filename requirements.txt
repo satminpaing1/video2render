@@ -1,6 +1,7 @@
-yt-dlp>=2024.08.06
 fastapi
 uvicorn
 python-multipart
 requests
 static-ffmpeg
+# yt-dlp ကို GitHub ကနေ တိုက်ရိုက်ယူသုံးပါမည် (Version အသစ်ဆုံးရရန်)
+git+https://github.com/yt-dlp/yt-dlp.git@master
