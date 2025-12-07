@@ -1,6 +1,6 @@
+yt-dlp>=2024.08.06
 fastapi
 uvicorn
 python-multipart
 requests
-yt-dlp>=2024.08.06
 static-ffmpeg
