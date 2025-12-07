@@ -1,5 +1,5 @@
 # main.py
-# Kaneki Downloader - Cleaned and Optimized for Direct Streaming
+# Kaneki Downloader - Cleaned, Fixes Resolution/MP3 Errors, Uses Direct Streaming
 
 import os
 import uuid
@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, Response, RedirectResponse
 
-# --- FFmpeg Loading (Relies on system ffmpeg from Dockerfile) ---
+# --- FFmpeg Loading ---
 try:
     import static_ffmpeg
     static_ffmpeg.add_paths()
@@ -35,7 +35,6 @@ app.add_middleware(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# DOWNLOAD_DIR ကို ဒီ Code မှာ အသုံးမပြုတော့ပါ (တိုက်ရိုက် Stream လုပ်မှာမို့)
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads") 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory=DOWNLOAD_DIR), name="files")
@@ -80,7 +79,7 @@ def ydl_base(extra: dict = None):
         "nocheckcertificate": True,
     }
     if os.path.exists(COOKIE_FILE):
-        opts["cookiefile"] = COOKIE_FILE
+        opts["cookiefile"] = COOKIE_FILE # Cookies are included here!
     if extra:
         opts.update(extra)
     return opts
@@ -105,7 +104,7 @@ def clean_youtube_url(url: str) -> str:
 # ----------------- Root and HEAD for health checks -----------------
 @app.get("/", include_in_schema=False)
 def root():
-    return {"status": "ok", "message": "Kaneki Downloader (cleaned)"}
+    return {"status": "ok", "message": "Kaneki Downloader (Direct Stream)"}
 
 @app.head("/", include_in_schema=False)
 def head_root():
@@ -141,15 +140,14 @@ def formats(url: str):
     opts = ydl_base({"skip_download": True})
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            # download=False is crucial to only fetch info
             info = ydl.extract_info(url, download=False)
 
         raw = info.get("formats", []) or []
-        # FIX: Ensure height is an int and filter formats with video streams
+        # FIX: Ensure height is an int and filter formats with video streams (Resolution Fix)
         heights = sorted({int(f["height"]) for f in raw if f.get("height") and f.get("vcodec") != "none"}, reverse=True)
 
         simplified = []
-        # Put auto (best) first if there are video heights
+        
         if heights:
             simplified.append({"format_id": "v-auto", "label": "Auto (best)", "ext": "mp4"})
             for h in heights:
@@ -159,10 +157,10 @@ def formats(url: str):
         # Audio alias
         audio_exists = any((f.get("acodec") and f.get("vcodec") == "none") for f in raw)
         if audio_exists:
-            # FIX: AUDIO_ID (mp3-best) is correctly used here
+            # MP3 Fix: Use the correct AUDIO_ID
             simplified.append({"format_id": AUDIO_ID, "label": "MP3 (bestaudio)", "ext": "mp3"})
 
-        # Also provide a sample of raw formats for advanced selection (first 40)
+        # Sample of raw formats (for advanced selection)
         raw_sample = []
         for f in raw[:40]:
             raw_sample.append({
@@ -180,16 +178,19 @@ def formats(url: str):
     except Exception as e:
         msg = str(e)
         print("FORMAT ERROR:", msg)
+        if "No address associated with hostname" in msg:
+            raise HTTPException(status_code=502, detail="DNS Error: Cannot reach YouTube. Check /nettest.")
         if "Sign in to confirm you're not a bot" in msg or "use --cookies" in msg.lower():
-            raise HTTPException(status_code=502, detail="COOKIES_REQUIRED: YouTube requires login cookies. Update YOUTUBE_COOKIES and redeploy.")
+            # This error suggests the cookies are NOT working or expired
+            raise HTTPException(status_code=502, detail="COOKIES_REQUIRED: YouTube requires login cookies. Please check your YOUTUBE_COOKIES value.")
         raise HTTPException(status_code=500, detail="Failed to fetch formats")
 
-# ----------------- DIRECT STREAMING ENDPOINT (FASTEST DOWNLOAD) -----------------
+# ----------------- DIRECT STREAMING/DOWNLOAD ENDPOINT (FASTEST METHOD) -----------------
 @app.get("/download")
 def download(url: str, format_id: str):
     """
     Extracts the final streaming URL and redirects the user's browser to it. 
-    This is the fastest method as the server does not download or process the file.
+    This is the fastest method (instant start).
     """
     if not url or not format_id:
         raise HTTPException(status_code=400, detail="Missing parameters")
@@ -198,27 +199,24 @@ def download(url: str, format_id: str):
     # 1. Determine the format expression
     if format_id == "v-auto":
         format_expr = "bestvideo+bestaudio/best"
-    # FIX: Ensure AUDIO_ID is correctly checked and uses the best audio format expression
+    # MP3 Fix: Ensure AUDIO_ID is correctly checked and assigned the right expression
     elif format_id == AUDIO_ID: 
         format_expr = "bestaudio/best"
     elif format_id.startswith("v-"):
-        # For specific resolution, we still choose best video up to that height + best audio
         try:
             req_h = int(format_id.split("-")[1])
             format_expr = f"bestvideo[height<={req_h}]+bestaudio/best"
         except Exception:
             format_expr = "bestvideo+bestaudio/best"
     else:
-        # Use provided raw format ID
         format_expr = format_id
 
     # 2. Configure yt-dlp to only simulate and get the URL
     opts = ydl_base({
         "format": format_expr, 
-        "skip_download": True, # Very important: Do not download the file
-        "simulate": True,      # Very important: Just get info, including final URL
+        "skip_download": True, # CRUCIAL: Don't download on server
+        "simulate": True,      # CRUCIAL: Get final URL
         "nocheckcertificate": True,
-        # We don't need postprocessors for streaming, so we omit that part.
     })
     
     try:
@@ -226,13 +224,11 @@ def download(url: str, format_id: str):
             # download=False returns the final stream URL in info['url']
             info = ydl.extract_info(url, download=False)
 
-        # The 'url' field contains the final direct streaming URL
         final_url = info.get("url")
 
         if final_url:
             print(f"Redirecting user to stream URL: {final_url}")
             # 3. Redirect the user's browser to the original YouTube/CDN stream URL
-            # The browser will handle the download/streaming directly from the source.
             return RedirectResponse(url=final_url, status_code=302)
         else:
             raise RuntimeError("Failed to extract final streaming URL. Source may be unavailable.")
@@ -241,9 +237,7 @@ def download(url: str, format_id: str):
         msg = str(e)
         print("STREAM URL ERROR:", msg)
         if "Sign in to confirm you're not a bot" in msg or "use --cookies" in msg.lower():
-            raise HTTPException(status_code=502, detail="COOKIES_REQUIRED: YouTube requires login cookies. Update YOUTUBE_COOKIES and redeploy.")
+            raise HTTPException(status_code=502, detail="COOKIES_REQUIRED: YouTube requires login cookies. Please check your YOUTUBE_COOKIES value.")
         if "Requested format is not available" in msg:
             raise HTTPException(status_code=400, detail="FORMAT_NOT_AVAILABLE: Requested format isn't available. Try 'v-auto'.")
         raise HTTPException(status_code=500, detail=f"Streaming failed: {msg}")
-
-# Note: The old server-side download logic is removed to prevent confusion and prioritize streaming.
