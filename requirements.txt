@@ -3,5 +3,4 @@ uvicorn
 python-multipart
 requests
 static-ffmpeg
-# Git မလိုဘဲ နောက်ဆုံးထွက် version ကို Zip အနေနဲ့ ယူသုံးပါမည်
 yt-dlp @ https://github.com/yt-dlp/yt-dlp/archive/master.zip
