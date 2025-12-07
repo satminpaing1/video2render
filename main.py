@@ -1,5 +1,5 @@
 # main.py
-# Kaneki Downloader - Complete Fix (No Cookies, Android Spoofing, Server-side Merge)
+# Kaneki Downloader - Force Fix (Cookies Disabled + Android Mode)
 
 import os
 import uuid
@@ -8,20 +8,19 @@ import urllib.parse as ul
 import yt_dlp
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 
-# --- FFmpeg Loading ---
-# Server ပေါ်မှာ FFmpeg မရှိရင် static_ffmpeg ကို သုံးပါမယ်
+# --- FFmpeg Setup ---
 try:
     import static_ffmpeg
     static_ffmpeg.add_paths()
-    print("INFO: static_ffmpeg loaded successfully.")
+    print("INFO: static_ffmpeg loaded.")
 except Exception:
-    print("INFO: static_ffmpeg not found, relying on system ffmpeg.")
+    print("INFO: System ffmpeg usage assumed.")
 
-# ----------------- App setup -----------------
-app = FastAPI(title="Kaneki Downloader V2.3 (Fixed)")
+app = FastAPI(title="Kaneki Downloader Final Fix")
 
+# CORS Setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,10 +33,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ----------------- Configuration -----------------
-AUDIO_ID = "mp3-best"
-
-# Anti-Bot Settings (Cookies မလိုဘဲ YouTube ကိုကျော်မယ့်နည်းလမ်း)
+# ----------------- Important: Anti-Bot Configuration -----------------
 def ydl_base(extra: dict = None):
     opts = {
         "quiet": True,
@@ -49,28 +45,30 @@ def ydl_base(extra: dict = None):
         "restrictfilenames": True,
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
         
-        # --- Crucial Anti-Bot Settings ---
+        # --- KEY FIX: Android Client Spoofing ---
+        # Cookies မပါဘဲ Android Phone ဟန်ဆောင်မည့်နည်းလမ်း
         "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
         "extractor_args": {
             "youtube": {
-                # Android Phone အနေနဲ့ ဟန်ဆောင်မည် (Cookies မလိုပါ)
                 "player_client": ["android", "web"],
                 "skip": ["dash", "hls"]
             }
         }
     }
     
-    # Cookies ကို sengaja ပိတ်ထားပါတယ် (Cloud Server ပေါ်မှာ Cookies ကြောင့် Error တက်တတ်လို့ပါ)
+    # ---------------------------------------------------------
+    # CRITICAL CHANGE: Cookies Loading Disabled
+    # Server ပေါ်မှာ Cookies ဖိုင်တွေ့ရင်တောင် မသုံးအောင် ပိတ်ထားလိုက်ပါပြီ
+    # ---------------------------------------------------------
     # if os.path.exists("cookies.txt"):
-    #     opts["cookiefile"] = "cookies.txt"
+    #     opts["cookiefile"] = "cookies.txt" 
 
     if extra:
         opts.update(extra)
     return opts
 
-# ----------------- Utilities -----------------
+# ----------------- Helpers -----------------
 def clean_url(url: str) -> str:
-    """ URL တွေကို သန့်ရှင်းရေးလုပ်မယ့် Function """
     if "youtube.com" in url or "youtu.be" in url:
         try:
             parsed = ul.urlparse(url)
@@ -84,84 +82,70 @@ def clean_url(url: str) -> str:
     return url
 
 def cleanup_file(path: str):
-    """ User ဆီ ဖိုင်ပို့ပြီးရင် Server ပေါ်ကဖိုင်ကို ပြန်ဖျက်မယ့် Function """
     try:
         if os.path.exists(path):
             os.remove(path)
-            print(f"CLEANUP: Removed {path}")
-        # ဆက်စပ်ဖိုင်များ (ဥပမာ .part) ကိုပါ ရှင်းလင်းခြင်း
-        base_name = os.path.splitext(path)[0]
-        for f in glob.glob(f"{base_name}*"):
-            try:
-                os.remove(f)
-            except:
-                pass
-    except Exception as e:
-        print(f"CLEANUP ERROR: {e}")
+        base = os.path.splitext(path)[0]
+        for f in glob.glob(f"{base}*"):
+            try: os.remove(f)
+            except: pass
+    except:
+        pass
 
-# ----------------- Health Checks (Fixes 405 Error) -----------------
-@app.get("/")
-def root():
-    return {"status": "online", "message": "Kaneki Downloader is Running"}
+# ----------------- Endpoints -----------------
 
+# Fix for 405 Method Not Allowed
 @app.head("/")
-def health_check():
+def health_check_head():
     return Response(status_code=200)
 
-# ----------------- Formats Endpoint -----------------
+@app.get("/")
+def health_check():
+    return {"status": "online", "message": "Kaneki Downloader Ready"}
+
 @app.get("/formats")
 def get_formats(url: str):
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-    
+    if not url: raise HTTPException(400, "URL required")
     url = clean_url(url)
+    
+    # Skip download just to get JSON info
     opts = ydl_base({"skip_download": True})
     
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-        raw = info.get("formats", [])
-        # Video Resolutions (Only those with video codec)
-        heights = sorted({int(f["height"]) for f in raw if f.get("height") and f.get("vcodec") != "none"}, reverse=True)
+        formats_raw = info.get("formats", [])
+        heights = sorted({int(f["height"]) for f in formats_raw if f.get("height") and f.get("vcodec") != "none"}, reverse=True)
         
-        simplified = []
-        if heights:
-            simplified.append({"format_id": "v-auto", "label": "Auto (Best Quality)", "ext": "mp4"})
-            for h in heights:
-                simplified.append({"format_id": f"v-{h}", "label": f"{h}p Quality", "ext": "mp4"})
+        simplified = [{"format_id": "v-auto", "label": "Auto (Best)", "ext": "mp4"}]
+        for h in heights:
+            simplified.append({"format_id": f"v-{h}", "label": f"{h}p", "ext": "mp4"})
         
-        # Add MP3 Option
-        simplified.append({"format_id": AUDIO_ID, "label": "Audio Only (MP3)", "ext": "mp3"})
+        simplified.append({"format_id": "mp3-best", "label": "Audio Only (MP3)", "ext": "mp3"})
         
         return {
             "title": info.get("title"),
             "thumbnail": info.get("thumbnail"),
-            "duration": info.get("duration_string"),
             "formats": simplified
         }
-        
     except Exception as e:
-        print(f"FORMAT ERROR: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"FORMAT ERROR: {e}")
+        raise HTTPException(500, str(e))
 
-# ----------------- Download Endpoint -----------------
 @app.get("/download")
-def download_video(url: str, format_id: str, background_tasks: BackgroundTasks):
-    if not url or not format_id:
-        raise HTTPException(status_code=400, detail="Missing parameters")
-    
+def download_media(url: str, format_id: str, background_tasks: BackgroundTasks):
     url = clean_url(url)
-    unique_id = uuid.uuid4().hex
-    output_template = os.path.join(DOWNLOAD_DIR, f"{unique_id}.%(ext)s")
-    
-    ydl_opts = {
-        "outtmpl": output_template,
+    uid = uuid.uuid4().hex
+    # Prepare template
+    cur_opts = {
+        "outtmpl": os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")
     }
-
-    # 1. MP3 Logic
-    if format_id == AUDIO_ID:
-        ydl_opts.update({
+    
+    target_ext = "mp4"
+    
+    if format_id == "mp3-best":
+        cur_opts.update({
             "format": "bestaudio/best",
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
@@ -170,69 +154,40 @@ def download_video(url: str, format_id: str, background_tasks: BackgroundTasks):
             }],
         })
         target_ext = "mp3"
-
-    # 2. Video Logic (Resolution Selection + Audio Merge)
     elif format_id.startswith("v-"):
         if format_id == "v-auto":
-            ydl_opts.update({"format": "bestvideo+bestaudio/best"})
+            cur_opts.update({"format": "bestvideo+bestaudio/best"})
         else:
             try:
-                height = int(format_id.split("-")[1])
-                ydl_opts.update({"format": f"bestvideo[height<={height}]+bestaudio/best"})
+                h = format_id.split("-")[1]
+                cur_opts.update({"format": f"bestvideo[height<={h}]+bestaudio/best"})
             except:
-                ydl_opts.update({"format": "bestvideo+bestaudio/best"})
-        
-        # Force merge to MP4 container
-        ydl_opts.update({"merge_output_format": "mp4"})
-        target_ext = "mp4"
-    
-    # 3. Fallback
+                cur_opts.update({"format": "bestvideo+bestaudio/best"})
+        cur_opts.update({"merge_output_format": "mp4"})
     else:
-        ydl_opts.update({"format": "best"})
-        target_ext = "mp4"
+        cur_opts.update({"format": "best"})
 
-    # Run Download
-    final_opts = ydl_base(ydl_opts)
+    final_opts = ydl_base(cur_opts)
+    
     try:
-        print(f"Starting download for {url} ({format_id})...")
         with yt_dlp.YoutubeDL(final_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            video_title = info.get('title', 'video')
+            title = info.get("title", "video")
             
-        # Clean filename for browser
-        safe_filename = "".join([c for c in video_title if c.isalnum() or c in " .-_"]).strip()
-        if not safe_filename: safe_filename = "download"
-        download_filename = f"{safe_filename}.{target_ext}"
+        safe_name = "".join([c for c in title if c.isalnum() or c in " .-_"]).strip() or "download"
+        filename = f"{safe_name}.{target_ext}"
         
-        # Locate the final file
-        # (yt-dlp might change extension based on conversion)
-        expected_file = os.path.join(DOWNLOAD_DIR, f"{unique_id}.{target_ext}")
+        # Find the file
+        fpath = os.path.join(DOWNLOAD_DIR, f"{uid}.{target_ext}")
+        if not os.path.exists(fpath):
+            files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{uid}*"))
+            if files: fpath = files[0]
+            else: raise Exception("File missing after download")
+            
+        background_tasks.add_task(cleanup_file, fpath)
         
-        # If exact match not found, look for any file with that ID
-        if not os.path.exists(expected_file):
-            found = glob.glob(os.path.join(DOWNLOAD_DIR, f"{unique_id}*"))
-            if found:
-                expected_file = found[0] # Use the first match
-            else:
-                raise Exception("File not found after download.")
-
-        # Schedule cleanup and return file
-        background_tasks.add_task(cleanup_file, expected_file)
+        return FileResponse(fpath, filename=filename, media_type="application/octet-stream")
         
-        return FileResponse(
-            path=expected_file,
-            filename=download_filename,
-            media_type="application/octet-stream"
-        )
-
     except Exception as e:
-        print(f"DOWNLOAD FAILED: {str(e)}")
-        # Cleanup partial files on error
-        for f in glob.glob(os.path.join(DOWNLOAD_DIR, f"{unique_id}*")):
-            try: os.remove(f)
-            except: pass
-            
-        error_msg = str(e)
-        if "Sign in" in error_msg:
-            error_msg = "Server blocked by YouTube. Please try again later."
-        raise HTTPException(status_code=500, detail=error_msg)
+        print(f"DOWNLOAD ERROR: {e}")
+        raise HTTPException(500, f"Server Error: {str(e)}")
