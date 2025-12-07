@@ -1,5 +1,5 @@
 # main.py
-# Kaneki Downloader - V3.0 (iOS Mode + No Cookies)
+# Kaneki Downloader - V4.0 (TV Embedded Mode)
 
 import os
 import uuid
@@ -8,18 +8,28 @@ import urllib.parse as ul
 import yt_dlp
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
-# --- Startup Check ---
-print("------------------------------------------------")
-print(" KANEKI V3.0 ACTIVATED - iOS MODE ")
-print("------------------------------------------------")
+# --- Version Info ---
+VERSION = "V4.0 (TV Mode)"
+print(f"------------------------------------------------")
+print(f" KANEKI {VERSION} STARTING... ")
+print(f"------------------------------------------------")
 
-app = FastAPI(title="Kaneki Downloader V3.0")
+# --- Cleanup Old Cookies ---
+# Server ပေါ်မှာ cookies.txt ကျန်နေရင် YouTube က Block တတ်လို့ အစကတည်းက ဖျက်ပါမယ်
+if os.path.exists("cookies.txt"):
+    try:
+        os.remove("cookies.txt")
+        print("INFO: Deleted old cookies.txt file.")
+    except Exception as e:
+        print(f"WARNING: Could not delete cookies.txt - {e}")
+
+app = FastAPI(title=f"Kaneki Downloader {VERSION}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # Frontend အားလုံးကို ခွင့်ပြုသည်
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,17 +49,16 @@ def ydl_base(extra: dict = None):
         "nocheckcertificate": True,
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
         
-        # --- NEW FIX: iOS Client Spoofing ---
-        # Android မရတော့လို့ iOS (iPhone) ပုံစံ ပြောင်းသုံးပါမည်
+        # --- NEW FIX: TV Embedded Mode ---
+        # Smart TV ကနေ ကြည့်သလို ဟန်ဆောင်မယ့် နည်းလမ်း (IP Block ခံရသက်သာသည်)
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios"],
+                "player_client": ["tv_embedded", "web_embedded"],
                 "skip": ["dash", "hls"]
             }
-        }
+        },
+        # User Agent ကိုမထည့်ဘဲ Default အတိုင်းထားတာက TV Mode မှာ ပိုအဆင်ပြေတတ်ပါတယ်
     }
-    
-    # Cookies ကို လုံးဝ မသုံးပါ (File ရှိရင်လည်း မဖတ်ပါ)
     
     if extra:
         opts.update(extra)
@@ -87,7 +96,7 @@ def health_check_head():
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "version": "v3.0 - iOS Mode"}
+    return {"status": "online", "version": VERSION}
 
 @app.get("/formats")
 def get_formats(url: str):
@@ -114,8 +123,8 @@ def get_formats(url: str):
         }
     except Exception as e:
         print(f"FORMAT ERROR: {e}")
-        # အသေးစိတ် Error ကို Frontend သို့ ပြန်ပို့ပေးခြင်း
-        raise HTTPException(500, str(e))
+        # Return 500 but include error detail for debugging
+        return JSONResponse(status_code=500, content={"detail": str(e), "error_type": "YouTube Block"})
 
 @app.get("/download")
 def download_media(url: str, format_id: str, background_tasks: BackgroundTasks):
@@ -157,7 +166,7 @@ def download_media(url: str, format_id: str, background_tasks: BackgroundTasks):
             
         safe_name = "".join([c for c in title if c.isalnum() or c in " .-_"]).strip() or "download"
         
-        # File ရှာဖွေခြင်း (Extension ပြောင်းသွားနိုင်လို့ glob သုံးပါတယ်)
+        # Locate file
         files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{uid}*"))
         if not files:
             raise Exception("File not found on server")
@@ -170,4 +179,4 @@ def download_media(url: str, format_id: str, background_tasks: BackgroundTasks):
         
     except Exception as e:
         print(f"DOWNLOAD ERROR: {e}")
-        raise HTTPException(500, f"YouTube Error: {str(e)}")
+        return JSONResponse(status_code=500, content={"detail": str(e)})
