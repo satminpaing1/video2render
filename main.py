@@ -1,35 +1,27 @@
 # main.py
-# Kaneki Downloader - V4.0 (TV Embedded Mode)
+# Kaneki Downloader - V5.0 (Smart Multi-Client Switching)
 
 import os
 import uuid
 import glob
+import time
 import urllib.parse as ul
 import yt_dlp
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 # --- Version Info ---
-VERSION = "V4.0 (TV Mode)"
+VERSION = "V5.0 (Smart Switch)"
 print(f"------------------------------------------------")
 print(f" KANEKI {VERSION} STARTING... ")
 print(f"------------------------------------------------")
-
-# --- Cleanup Old Cookies ---
-# Server ပေါ်မှာ cookies.txt ကျန်နေရင် YouTube က Block တတ်လို့ အစကတည်းက ဖျက်ပါမယ်
-if os.path.exists("cookies.txt"):
-    try:
-        os.remove("cookies.txt")
-        print("INFO: Deleted old cookies.txt file.")
-    except Exception as e:
-        print(f"WARNING: Could not delete cookies.txt - {e}")
 
 app = FastAPI(title=f"Kaneki Downloader {VERSION}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Frontend အားလုံးကို ခွင့်ပြုသည်
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,28 +30,42 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
 # ----------------- Configuration -----------------
-def ydl_base(extra: dict = None):
+# စမ်းသပ်မည့် Client များ (အစဉ်လိုက်)
+CLIENTS_TO_TRY = [
+    "android",          # Formats ဖတ်ရာတွင် အကောင်းဆုံး
+    "web",              # Download လုပ်ရာတွင် တစ်ခါတစ်ရံ ပိုကောင်းသည်
+    "mweb",             # Mobile Web
+    "ios",              # iPhone
+    "tv_embedded"       # နောက်ဆုံးမှ စမ်းမည်
+]
+
+def get_ydl_opts(client_type="android", extra: dict = None):
+    """ Client အမျိုးအစားအလိုက် Setting ချပေးမည့် Function """
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "socket_timeout": 30,
+        "socket_timeout": 20,
         "nocheckcertificate": True,
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s"),
         
-        # --- NEW FIX: TV Embedded Mode ---
-        # Smart TV ကနေ ကြည့်သလို ဟန်ဆောင်မယ့် နည်းလမ်း (IP Block ခံရသက်သာသည်)
+        # Client Spoofing logic
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv_embedded", "web_embedded"],
+                "player_client": [client_type],
                 "skip": ["dash", "hls"]
             }
-        },
-        # User Agent ကိုမထည့်ဘဲ Default အတိုင်းထားတာက TV Mode မှာ ပိုအဆင်ပြေတတ်ပါတယ်
+        }
     }
     
+    # Custom User Agent ကို ဖယ်လိုက်ပါပြီ (Conflict မဖြစ်အောင်)
+    # Cookies ဖိုင်ရှိမှ ထည့်မည်
+    if os.path.exists(COOKIE_FILE):
+        opts["cookiefile"] = COOKIE_FILE
+
     if extra:
         opts.update(extra)
     return opts
@@ -102,38 +108,60 @@ def health_check():
 def get_formats(url: str):
     if not url: raise HTTPException(400, "URL required")
     url = clean_url(url)
-    opts = ydl_base({"skip_download": True})
     
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    last_error = ""
+    
+    # Smart Loop: Client တစ်ခုချင်းစီ အလှည့်ကျ စမ်းမည်
+    for client in CLIENTS_TO_TRY:
+        print(f"INFO: Trying to fetch formats with client: '{client}'...")
+        opts = get_ydl_opts(client, {"skip_download": True})
+        
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
             
-        formats_raw = info.get("formats", [])
-        heights = sorted({int(f["height"]) for f in formats_raw if f.get("height") and f.get("vcodec") != "none"}, reverse=True)
-        
-        simplified = [{"format_id": "v-auto", "label": "Auto (Best)", "ext": "mp4"}]
-        for h in heights:
-            simplified.append({"format_id": f"v-{h}", "label": f"{h}p", "ext": "mp4"})
-        simplified.append({"format_id": "mp3-best", "label": "Audio Only (MP3)", "ext": "mp3"})
-        
-        return {
-            "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
-            "formats": simplified
-        }
-    except Exception as e:
-        print(f"FORMAT ERROR: {e}")
-        # Return 500 but include error detail for debugging
-        return JSONResponse(status_code=500, content={"detail": str(e), "error_type": "YouTube Block"})
+            # အဆင်ပြေရင် Loop ရပ်ပြီး Data ပြန်ပို့မည်
+            print(f"SUCCESS: Formats fetched with '{client}'")
+            
+            formats_raw = info.get("formats", [])
+            heights = sorted({int(f["height"]) for f in formats_raw if f.get("height") and f.get("vcodec") != "none"}, reverse=True)
+            
+            simplified = [{"format_id": "v-auto", "label": "Auto (Best)", "ext": "mp4"}]
+            for h in heights:
+                simplified.append({"format_id": f"v-{h}", "label": f"{h}p", "ext": "mp4"})
+            simplified.append({"format_id": "mp3-best", "label": "Audio Only (MP3)", "ext": "mp3"})
+            
+            return {
+                "title": info.get("title"),
+                "thumbnail": info.get("thumbnail"),
+                "formats": simplified,
+                "used_client": client # Download လုပ်ရင် ပြန်သုံးဖို့ မှတ်သားထားမည်
+            }
+            
+        except Exception as e:
+            err_msg = str(e)
+            print(f"FAIL: '{client}' failed. Error: {err_msg}")
+            last_error = err_msg
+            # နောက် Client တစ်ခု ဆက်စမ်းမည်
+            continue
+
+    # အကုန်စမ်းလို့မှ မရရင် Error ပြမည်
+    print("ALL CLIENTS FAILED.")
+    raise HTTPException(500, f"Failed to fetch info. YouTube blocked all attempts. Last error: {last_error}")
 
 @app.get("/download")
-def download_media(url: str, format_id: str, background_tasks: BackgroundTasks):
+def download_media(url: str, format_id: str, background_tasks: BackgroundTasks, used_client: str = "android"):
     url = clean_url(url)
     uid = uuid.uuid4().hex
     
-    cur_opts = {"outtmpl": os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")}
-    target_ext = "mp4"
+    # Formats တုန်းက အလုပ်ဖြစ်ခဲ့တဲ့ Client ကို ဦးစားပေးသုံးမည်
+    current_client = used_client if used_client in CLIENTS_TO_TRY else "android"
     
+    cur_opts = {
+        "outtmpl": os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")
+    }
+    
+    # Format selection logic
     if format_id == "mp3-best":
         cur_opts.update({
             "format": "bestaudio/best",
@@ -154,19 +182,22 @@ def download_media(url: str, format_id: str, background_tasks: BackgroundTasks):
             except:
                 cur_opts.update({"format": "bestvideo+bestaudio/best"})
         cur_opts.update({"merge_output_format": "mp4"})
+        target_ext = "mp4"
     else:
         cur_opts.update({"format": "best"})
+        target_ext = "mp4"
 
-    final_opts = ydl_base(cur_opts)
+    # Download Attempt (Single try with the working client)
+    final_opts = get_ydl_opts(current_client, cur_opts)
     
     try:
+        print(f"STARTING DOWNLOAD with client '{current_client}'...")
         with yt_dlp.YoutubeDL(final_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get("title", "video")
             
         safe_name = "".join([c for c in title if c.isalnum() or c in " .-_"]).strip() or "download"
         
-        # Locate file
         files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{uid}*"))
         if not files:
             raise Exception("File not found on server")
@@ -179,4 +210,19 @@ def download_media(url: str, format_id: str, background_tasks: BackgroundTasks):
         
     except Exception as e:
         print(f"DOWNLOAD ERROR: {e}")
-        return JSONResponse(status_code=500, content={"detail": str(e)})
+        # အကယ်၍ Download မှာမှ Error ထပ်တက်ရင် Fallback အနေနဲ့ Web Client နဲ့ ထပ်စမ်းကြည့်ခြင်း
+        if current_client != "web":
+            try:
+                print("RETRYING download with 'web' client...")
+                retry_opts = get_ydl_opts("web", cur_opts)
+                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                    ydl.extract_info(url, download=True)
+                # (File finding logic repeated...)
+                files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{uid}*"))
+                if files:
+                    background_tasks.add_task(cleanup_file, files[0])
+                    return FileResponse(files[0], filename=f"{safe_name}.{target_ext}", media_type="application/octet-stream")
+            except:
+                pass
+                
+        raise HTTPException(500, f"Download Failed: {str(e)}")
